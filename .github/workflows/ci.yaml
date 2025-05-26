@@ -1,112 +1,96 @@
+---
 name: CI
 
 on: pull_request
 
+concurrency:
+  group: ${{ github.head_ref }}
+  cancel-in-progress: true
+
 jobs:
   setup_matrix:
-    name: "Setup Test Matrix"
-    runs-on: ubuntu-22.04
+    name: Setup Test Matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
     outputs:
-      matrix: ${{ steps.get-outputs.outputs.matrix }}
-      spec_matrix: ${{ steps.get-outputs.outputs.spec_matrix }}
-    env:
-      BUNDLE_WITHOUT: development:test:release
+      puppet_unit_test_matrix: ${{ steps.get-outputs.outputs.puppet_unit_test_matrix }}
+      github_action_test_matrix: ${{ steps.get-outputs.outputs.github_action_test_matrix }}
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
+
       - name: Setup ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: "2.7"
+          ruby-version: '2.7.3'
           bundler-cache: true
-      - name: Run rake validate
-        run: bundle exec rake validate
+
+
+      - name: Run Puppet Syntax Check
+        run: bundle exec rake syntax
+
+      - name: Run Puppet Lint
+        run: bundle exec rake lint
+
+      - name: Run rake rubocop
+        run: bundle exec rake rubocop
 
       - name: Setup Test Matrix
         id: get-outputs
-        run: bundle exec matrix_from_metadata_v2
+        run: bundle exec metadata2gha --pidfile-workaround false
 
   unit:
     needs: setup_matrix
-    runs-on: ubuntu-20.04
-    if: ${{ needs.setup_matrix.outputs.spec_matrix != '{}' }}
-
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
     strategy:
       fail-fast: false
-      matrix: ${{fromJson(needs.setup_matrix.outputs.spec_matrix)}}
-
-    env:
-      PUPPET_GEM_VERSION: ${{ matrix.puppet_version }}
-      FACTER_GEM_VERSION: 'https://github.com/puppetlabs/facter#main'
-
-    name: "Spec: puppet ${{ matrix.puppet_version }} (ruby ${{ matrix.ruby_version }})"
+      matrix:
+        include: ${{fromJson(needs.setup_matrix.outputs.puppet_unit_test_matrix)}}
+    name: Spec Puppet ${{ matrix.puppet }} (Ruby ${{ matrix.ruby }})
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: Setup ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: ${{ matrix.ruby_version }}
+          ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
 
-      - name: Print bundle environment
-        run: |
-          bundle env
+      - name: Run tests
+        run: bundle exec rake parallel_spec
 
-      - name: Run Static & Syntax Tests
-        run: |
-          bundle exec rake syntax lint metadata_lint check:symlinks check:git_ignore check:dot_underscore check:test_file rubocop
+# TODO: active when acceptance tests have been added
+#  acceptance:
+#    name: Litmus Acceptance
+#    runs-on: ubuntu-latest
+#    env:
+#      BOLT_GEM: true
+#      CI: true
+#    steps:
+#      - uses: actions/checkout@v3
+#      - name: Setup ruby
+#        uses: ruby/setup-ruby@v1
+#        with:
+#          ruby-version: '2.7.3'
+#          bundler-cache: true
+#
+#      - name: Provision Testing Environments
+#        run: |
+#          bundle exec rake 'litmus:provision_list[default]'
+#          bundle exec rake 'litmus:install_agent'
+#          bundle exec rake 'litmus:install_module'
+#      - name: Run Tests
+#        run: bundle exec rake 'litmus:acceptance:parallel'
+#
+#      - name: Tear Down
+#        run: bundle exec rake 'litmus:tear_down'
 
-      - name: Run parallel_spec tests
-        run: |
-          bundle exec rake parallel_spec
-
-  acceptance:
-    needs: setup_matrix
-    runs-on: ubuntu-20.04
-    if: ${{ needs.setup_matrix.outputs.matrix != '{}' }}
-
-    strategy:
-      fail-fast: false
-      matrix: ${{fromJson(needs.setup_matrix.outputs.matrix)}}
-
-    name: "Acceptance: ${{matrix.platforms.label}}, ${{matrix.collection}}"
+  tests:
+    needs:
+      - unit
+# TODO: active when acceptance tests have been added
+#      - acceptance
+    runs-on: ubuntu-latest
+    name: Test suite
     steps:
-      - uses: actions/checkout@v2
-
-      - name: Setup ruby
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: 2.7
-          bundler-cache: true
-
-      - name: Print bundle environment
-        run: |
-          bundle env
-
-      - name: Provision test environment
-        run: |
-          bundle exec rake 'litmus:provision[docker,${{ matrix.platforms.image }}]'
-
-      - name: Install agent
-        run: |
-          bundle exec rake 'litmus:install_agent[${{ matrix.collection }}]'
-
-      - name: Install module
-        run: |
-          bundle exec rake 'litmus:install_module'
-
-      # - name: Display sysctl settings
-      #   run: |
-      #     bundle exec bolt command run 'sysctl -a' --targets localhost:2222 -i spec/fixtures/litmus_inventory.yaml
-
-      - name: Run acceptance tests
-        run: |
-          bundle exec rake 'litmus:acceptance:parallel'
-
-      - name: Remove test environment
-        if: ${{ always() }}
-        continue-on-error: true
-        run: |
-          if [[ -f inventory.yaml || -f spec/fixtures/litmus_inventory.yaml ]]; then
-            bundle exec rake 'litmus:tear_down'
-          fi
+      - run: echo Test suite completed
